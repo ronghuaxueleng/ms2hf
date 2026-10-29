@@ -31,6 +31,7 @@
 - 支持 `--workers` 并发同步，提高传输效率。
 - 支持 `--dry-run` 预览将要同步的文件，不实际下载 / 上传。
 - 支持 `--create-target` 自动创建目标仓库。
+- 支持 `hf2ms --encrypt` 加密内容和文件名，密钥随文件保存在目标仓库，并提供解密命令。
 - 同步过程中显示进度条。
 - 同步完成后输出成功、跳过、失败数量。
 
@@ -231,6 +232,7 @@ ms2hf org/dataset your-name/dataset \
 | `--create-target` | 如果目标仓库不存在，尝试自动创建 |
 | `--private` | 和 `--create-target` 一起使用，创建私有仓库 |
 | `--dry-run` | 只预览，不实际同步 |
+| `--encrypt` | 仅 `hf2ms`：加密文件内容和原始路径，密钥保存在目标仓库 |
 | `--keep-local` | 上传后保留本地临时文件 |
 | `--commit-message-template` | 自定义每个文件上传时的 commit message 模板 |
 
@@ -293,6 +295,120 @@ ms2hf k2-fsa/OpenDialog your-hf-name/OpenDialog \
 
 这个策略比较保守，能避免重复传输，但不会跨平台比较 hash。如果你怀疑目标文件内容不是最新的，请使用 `--force`。
 
+## 从 Hugging Face 加密同步到魔搭
+
+当普通上传因文件名或内容中的关键字被拒绝时，可使用 `hf2ms --encrypt`。
+此模式把每个文件加密后以随机名称上传，原始文件名和目录结构保存在**加密清单**中，
+不会明文写入目标文件名、清单或默认提交信息。目标仓库会生成一份通用的解密 README，
+源仓库的 README 则作为普通文件加密保存。仓库 ID 仍需自行选择平台接受的名称；
+加密不能保证平台接受上传。
+
+**密钥按设计与密文保存在同一仓库，任何有读取权限的人都可以解密，因此不提供访问保密性。**
+加密后的仓库是归档，需先解密才能加载模型或数据集。GitHub Actions 日志仍会显示原始文件路径。
+
+### 通过 GitHub Actions 使用
+
+先将包含此功能的代码推送到自己的 GitHub 仓库，并在
+`Settings → Secrets and variables → Actions` 中配置 `HF_TOKEN` 和 `MS_TOKEN`。
+随后打开 `Actions → 同步 ModelScope / Hugging Face → Run workflow`，例如：
+
+```text
+direction: hf2ms
+repo_type: model
+source_repo: hf-owner/source-model
+target_repo: ms-owner/archive
+target_revision: 留空
+workers: 1
+create_target: true
+encrypt: true
+force: false
+dry_run: false
+```
+
+数据集将 `repo_type` 改为 `dataset`。建议使用全新的目标仓库；首次运行会生成密钥和清单，
+并覆盖目标 `README.md` 为解密说明。为避免遗留明文文件，加密模式拒绝包含其他普通文件的目标仓库
+（允许平台默认的 `README.md` 和 `.gitattributes`）。已经上传过部分明文的仓库请换用新仓库。
+
+重复运行时继续勾选 `encrypt`，工具会读取并复用目标仓库的密钥、文件名映射，
+跳过已存在的密文，补传失败或缺失的文件。源文件内容更新后，勾选 `force` 重新加密上传；
+不会自动删除源仓库已经移除的文件。不要删除或手动修改密钥和清单，
+缺失或损坏时工具会停止，避免生成新密钥导致已有文件无法恢复。
+同一 GitHub 仓库内的 Actions 会按目标仓库串行运行；请勿从其他 GitHub 仓库或本地同时向同一目标同步。
+
+`dry_run` 不创建目标仓库，也不上传密钥、清单或文件，因此预览需要目标仓库已存在。
+加密预览只会下载已有密钥和清单以判断哪些文件需要传输，不下载源文件内容。
+加密模式只写入魔搭默认分支，请将 `target_revision` 留空。
+
+### 在命令行使用
+
+此功能需要从包含修改的源码安装，已有 PyPI 版本可能尚不包含加密功能：
+
+```bash
+pip install .
+
+export HF_TOKEN="hf_xxx"
+export MS_TOKEN="xxx"
+
+hf2ms hf-owner/source-model ms-owner/archive \
+  --repo-type model \
+  --create-target \
+  --encrypt \
+  --work-dir ./sync-work
+```
+
+过滤规则仍匹配原始路径，`--force`、`--workers`、`--keep-local` 等选项仍可使用。
+加密使用分块 AES-256-GCM，每块有认证标签，并验证文件结束标记；
+内存不会随单文件大小增长。本地同时需要容纳正在处理文件的明文和密文，
+磁盘需求约为原模式的两倍，`workers` 越大所需空间越多。
+默认每个文件处理完成后清理本地明文和密文（包括失败时）；
+`--keep-local` 会保留它们。
+
+### 下载并恢复原始文件
+
+目标布局如下，原始路径只存在于加密清单中：
+
+```text
+README.md
+ms2hf/
+  key.json
+  manifest.enc
+  data/
+    <随机名称>.enc
+```
+
+1. 下载整个魔搭目标仓库，保留以上结构，确保获得完整大文件，不能只有 Git LFS 指针。
+   例如使用魔搭 SDK 下载模型或数据集仓库：
+
+   ```python
+   from modelscope import snapshot_download, dataset_snapshot_download
+
+   # 模型（根据实际仓库类型二选一）
+   snapshot_download("ms-owner/archive", local_dir="./downloaded-repo")
+   # 数据集
+   # dataset_snapshot_download("ms-owner/archive", local_dir="./downloaded-repo")
+   ```
+
+   私有仓库需先通过魔搭 SDK 登录具有读取权限的账号。
+
+2. 从运行同步任务的同一代码版本安装工具，然后恢复到仓库以外的独立目录：
+
+   ```bash
+   pip install /path/to/ms2hf
+   ms2hf-decrypt ./downloaded-repo ./restored-files
+   ```
+
+   也可以直接在源码目录运行：
+
+   ```bash
+   python ms2hf_crypto.py ./downloaded-repo ./restored-files
+   ```
+
+恢复后，`restored-files` 中保留原始文件名、子目录和内容，包括源仓库的 README。
+默认不覆盖已有文件；需要覆盖时添加 `--overwrite`。
+错误密钥、损坏或截断的密文会导致恢复失败，未通过完整验证的文件不会替换已有输出。
+若同步尚未完成，清单中的缺失文件会被报告为失败，命令返回非零退出码；
+重新运行加密同步补齐文件后，再执行解密。
+
 ## 当前限制
 
 - 目前“是否已存在”主要按文件路径判断，不做跨平台 hash 对比。
@@ -308,13 +424,15 @@ ms2hf k2-fsa/OpenDialog your-hf-name/OpenDialog \
 [project.scripts]
 ms2hf = "ms2hf:main_ms2hf"
 hf2ms = "ms2hf:main_hf2ms"
+ms2hf-decrypt = "ms2hf_crypto:main"
 ```
 
 本地检查：
 
 ```bash
-python -m py_compile ms2hf.py
+python -m py_compile ms2hf.py ms2hf_crypto.py
 python ms2hf.py --help
+python -m unittest discover -s tests -v
 ```
 
 本地安装测试：
@@ -323,6 +441,7 @@ python ms2hf.py --help
 pip install -e .
 ms2hf --help
 hf2ms --help
+ms2hf-decrypt --help
 ```
 
 ## 许可证
@@ -406,6 +525,7 @@ GitHub 仓库页面 -> Actions -> 同步 ModelScope / Hugging Face -> Run workfl
 - 是否 force；
 - 是否 create target；
 - 是否 dry run；
+- 是否 encrypt（仅 `hf2ms`）；
 - Hugging Face token；
 - ModelScope token。
 

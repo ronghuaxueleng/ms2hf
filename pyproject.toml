@@ -30,6 +30,7 @@ dependencies = [
   "huggingface_hub>=0.20.0",
   "modelscope>=1.9.0",
   "tqdm>=4.64.0",
+  "cryptography>=41.0.0",
 ]
 
 [project.urls]
@@ -39,6 +40,7 @@ Issues = "https://github.com/pkufool/ms2hf/issues"
 [project.scripts]
 ms2hf = "ms2hf:main_ms2hf"
 hf2ms = "ms2hf:main_hf2ms"
+ms2hf-decrypt = "ms2hf_crypto:main"
 
 [tool.setuptools]
-py-modules = ["ms2hf"]
+py-modules = ["ms2hf", "ms2hf_crypto"]

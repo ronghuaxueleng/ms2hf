@@ -83,6 +83,11 @@ on:
         required: true
         type: boolean
         default: false
+      encrypt:
+        description: "仅 hf2ms：加密内容和文件名，密钥存入目标仓库（有读取权限即可解密）"
+        required: true
+        type: boolean
+        default: false
       hf_token:
         description: "Hugging Face token（注意：更推荐使用仓库 Secrets；此输入会被日志 mask，但仍应谨慎使用）"
         required: false
@@ -95,6 +100,11 @@ on:
 permissions:
   contents: read
 
+# A shared target key/manifest must not be updated by two runs at once.
+concurrency:
+  group: sync-${{ inputs.target_repo }}
+  cancel-in-progress: false
+
 jobs:
   sync:
     name: 执行同步
@@ -106,6 +116,23 @@ jobs:
       HF_TOKEN: ${{ inputs.hf_token || secrets.HF_TOKEN }}
       MS_TOKEN: ${{ inputs.ms_token || secrets.MS_TOKEN }}
       WORK_DIR: /tmp/ms2hf-work
+      SYNC_DIRECTION: ${{ inputs.direction }}
+      SYNC_REPO_TYPE: ${{ inputs.repo_type }}
+      SYNC_SOURCE: ${{ inputs.source_repo }}
+      SYNC_TARGET: ${{ inputs.target_repo }}
+      SYNC_SOURCE_REVISION: ${{ inputs.source_revision }}
+      SYNC_TARGET_REVISION: ${{ inputs.target_revision }}
+      SYNC_INCLUDE_REGEX: ${{ inputs.include_regex }}
+      SYNC_EXCLUDE_REGEX: ${{ inputs.exclude_regex }}
+      SYNC_WORKERS: ${{ inputs.workers }}
+      SYNC_MAX_RETRIES: ${{ inputs.max_retries }}
+      SYNC_RETRY_SLEEP: ${{ inputs.retry_sleep }}
+      SYNC_FORCE: ${{ inputs.force }}
+      SYNC_CREATE_TARGET: ${{ inputs.create_target }}
+      SYNC_PRIVATE: ${{ inputs.private }}
+      SYNC_DRY_RUN: ${{ inputs.dry_run }}
+      SYNC_KEEP_LOCAL: ${{ inputs.keep_local }}
+      SYNC_ENCRYPT: ${{ inputs.encrypt }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -130,13 +157,14 @@ jobs:
       - name: 显示同步配置摘要
         shell: bash
         run: |
-          echo "同步方向: ${{ inputs.direction }}"
-          echo "仓库类型: ${{ inputs.repo_type }}"
-          echo "源仓库:   ${{ inputs.source_repo }}"
-          echo "目标仓库: ${{ inputs.target_repo }}"
-          echo "workers:  ${{ inputs.workers }}"
-          echo "force:    ${{ inputs.force }}"
-          echo "dry_run:  ${{ inputs.dry_run }}"
+          echo "同步方向: ${SYNC_DIRECTION}"
+          echo "仓库类型: ${SYNC_REPO_TYPE}"
+          echo "源仓库:   ${SYNC_SOURCE}"
+          echo "目标仓库: ${SYNC_TARGET}"
+          echo "workers:  ${SYNC_WORKERS}"
+          echo "force:    ${SYNC_FORCE}"
+          echo "dry_run:  ${SYNC_DRY_RUN}"
+          echo "encrypt:  ${SYNC_ENCRYPT}"
           echo "work_dir: ${WORK_DIR}"
 
       - name: 执行同步
@@ -145,46 +173,49 @@ jobs:
           set -euo pipefail
           mkdir -p "${WORK_DIR}"
 
-          cmd=("${{ inputs.direction }}" "${{ inputs.source_repo }}" "${{ inputs.target_repo }}")
-          cmd+=(--repo-type "${{ inputs.repo_type }}")
+          cmd=("${SYNC_DIRECTION}" "${SYNC_SOURCE}" "${SYNC_TARGET}")
+          cmd+=(--repo-type "${SYNC_REPO_TYPE}")
           cmd+=(--work-dir "${WORK_DIR}")
-          cmd+=(--workers "${{ inputs.workers }}")
-          cmd+=(--max-retries "${{ inputs.max_retries }}")
-          cmd+=(--retry-sleep "${{ inputs.retry_sleep }}")
+          cmd+=(--workers "${SYNC_WORKERS}")
+          cmd+=(--max-retries "${SYNC_MAX_RETRIES}")
+          cmd+=(--retry-sleep "${SYNC_RETRY_SLEEP}")
 
-          if [ -n "${{ inputs.source_revision }}" ]; then
-            cmd+=(--source-revision "${{ inputs.source_revision }}")
+          if [ -n "${SYNC_SOURCE_REVISION}" ]; then
+            cmd+=(--source-revision "${SYNC_SOURCE_REVISION}")
           fi
-          if [ -n "${{ inputs.target_revision }}" ]; then
-            cmd+=(--target-revision "${{ inputs.target_revision }}")
+          if [ -n "${SYNC_TARGET_REVISION}" ]; then
+            cmd+=(--target-revision "${SYNC_TARGET_REVISION}")
           fi
 
           while IFS= read -r pattern; do
             if [ -n "${pattern}" ]; then
               cmd+=(--include-regex "${pattern}")
             fi
-          done <<< "${{ inputs.include_regex }}"
+          done <<< "${SYNC_INCLUDE_REGEX}"
 
           while IFS= read -r pattern; do
             if [ -n "${pattern}" ]; then
               cmd+=(--exclude-regex "${pattern}")
             fi
-          done <<< "${{ inputs.exclude_regex }}"
+          done <<< "${SYNC_EXCLUDE_REGEX}"
 
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "${SYNC_FORCE}" = "true" ]; then
             cmd+=(--force)
           fi
-          if [ "${{ inputs.create_target }}" = "true" ]; then
+          if [ "${SYNC_CREATE_TARGET}" = "true" ]; then
             cmd+=(--create-target)
           fi
-          if [ "${{ inputs.private }}" = "true" ]; then
+          if [ "${SYNC_PRIVATE}" = "true" ]; then
             cmd+=(--private)
           fi
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "${SYNC_DRY_RUN}" = "true" ]; then
             cmd+=(--dry-run)
           fi
-          if [ "${{ inputs.keep_local }}" = "true" ]; then
+          if [ "${SYNC_KEEP_LOCAL}" = "true" ]; then
             cmd+=(--keep-local)
+          fi
+          if [ "${SYNC_ENCRYPT}" = "true" ]; then
+            cmd+=(--encrypt)
           fi
 
           "${cmd[@]}"

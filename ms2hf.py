@@ -435,6 +435,7 @@ def sync_repositories(
     dry_run: bool,
     keep_local: bool,
     commit_message_template: str,
+    encrypt: bool = False,
 ) -> List[FileResult]:
     """Run one repository sync job.
 
@@ -447,6 +448,12 @@ def sync_repositories(
     """
 
     from tqdm.auto import tqdm
+
+    if encrypt and direction != "hf2ms":
+        raise ValueError("--encrypt is supported only by hf2ms")
+    if encrypt and target_revision:
+        raise ValueError("Encrypted uploads use ModelScope's default branch; omit --target-revision")
+    max_retries = max(1, max_retries)
 
     # Choose source and target backends from the command direction.
     if direction == "ms2hf":
@@ -462,7 +469,7 @@ def sync_repositories(
     else:
         raise ValueError(f"Unsupported direction: {direction}")
 
-    if create_target:
+    if create_target and not dry_run:
         print(f"Ensuring target {target_name} {repo_type} repo exists: {target_repo}")
         target.create_repo(target_repo, repo_type, private=private)
 
@@ -484,11 +491,36 @@ def sync_repositories(
             item.path for item in target.list_files(target_repo, repo_type, target_revision)
         }
     except Exception as exc:  # noqa: BLE001
+        if dry_run:
+            raise RuntimeError(
+                f"Could not list target repo {target_repo!r}. Dry runs do not create repositories; "
+                f"preview requires an existing readable target. Original error: {exc}"
+            ) from exc
         if create_target:
             raise
         raise RuntimeError(
             f"Could not list target repo {target_repo!r}. If it does not exist, rerun with --create-target. Original error: {exc}"
         ) from exc
+
+    encrypted_target = None
+    if encrypt:
+        from ms2hf_crypto import EncryptedTarget
+
+        def retry_metadata(action: Callable[[], None]) -> None:
+            _with_retries(action, max_retries=max_retries, retry_sleep=retry_sleep,
+                          retry_label="Encrypted archive metadata")
+
+        work_dir.mkdir(parents=True, exist_ok=True)
+        encrypted_target = EncryptedTarget(
+            target, target_repo, repo_type, target_existing, selected,
+            dry_run=dry_run, work_dir=work_dir, retry=retry_metadata,
+        )
+        target_existing = encrypted_target.existing
+        print("Encrypted mode: key is stored in the target repository; readers can decrypt it.")
+    elif direction == "hf2ms" and (
+        "ms2hf/key.json" in target_existing or "ms2hf/manifest.enc" in target_existing
+    ):
+        raise ValueError("Target is an encrypted archive; rerun with --encrypt or use a different target")
 
     skipped_existing = 0 if force else sum(1 for item in selected if item.path in target_existing)
     to_transfer = selected if force else [item for item in selected if item.path not in target_existing]
@@ -506,7 +538,6 @@ def sync_repositories(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     workers = max(1, workers)
-    max_retries = max(1, max_retries)
 
     initial_skips = [
         FileResult(item.path, "skipped", "already exists on target")
@@ -543,7 +574,12 @@ def sync_repositories(
             if local_path is None:
                 raise RuntimeError("download did not produce a local path")
 
-            commit_message = _make_commit_message(commit_message_template, direction, item.path)
+            upload_path = local_path
+            target_path = item.path
+            if encrypted_target is not None:
+                target_path, upload_path = encrypted_target.encrypt(item.path, local_path, file_work_dir)
+                # Source paths can also trigger keyword checks in commit messages.
+            commit_message = _make_commit_message(commit_message_template, direction, target_path)
 
             def upload_action() -> None:
                 # Temporary files are cleaned up in finally unless keep_local is set.
@@ -551,8 +587,8 @@ def sync_repositories(
                 target.upload_file(
                     target_repo,
                     repo_type,
-                    item.path,
-                    local_path,
+                    target_path,
+                    upload_path,
                     commit_message,
                     target_revision,
                 )
@@ -663,7 +699,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create the target repo first if the platform API supports it.",
     )
     parser.add_argument("--private", action="store_true", help="Create target repo as private when using --create-target.")
-    parser.add_argument("--dry-run", action="store_true", help="List what would be synced without downloading or uploading.")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Preview without source file transfers or target changes. Encrypted preview reads target metadata.",
+    )
+    parser.add_argument(
+        "--encrypt", action="store_true",
+        help="hf2ms only: encrypt file contents and names; store the decryption key in the target repo.",
+    )
     parser.add_argument(
         "--keep-local",
         action="store_true",
@@ -726,6 +769,7 @@ def run_cli(direction: str, argv: Optional[Sequence[str]] = None) -> int:
             dry_run=args.dry_run,
             keep_local=args.keep_local,
             commit_message_template=args.commit_message_template,
+            encrypt=args.encrypt,
         )
     except KeyboardInterrupt:
         print("Interrupted", file=sys.stderr)
