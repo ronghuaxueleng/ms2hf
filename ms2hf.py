@@ -261,10 +261,16 @@ class ModelScopeBackend:
                 recursive=True,
                 use_cookies=bool(self.token),
             )
+            # New SDK compatibility layers return only Path/Size, dropping Type.
+            # A path containing children is a directory even without that field.
+            directories: Set[str] = set()
+            for entry in files:
+                parts = (entry.get("Path") or "").split("/")
+                directories.update("/".join(parts[:i]) for i in range(1, len(parts)))
             return [
                 FileItem(path=f["Path"], size=_coerce_size(f.get("Size") or f.get("size")))
                 for f in files
-                if f.get("Type") != "tree" and f.get("Path")
+                if f.get("Type") != "tree" and f.get("Path") and f["Path"] not in directories
             ]
 
         # ModelScope dataset repository trees are paginated.

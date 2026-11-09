@@ -9,6 +9,24 @@ import ms2hf
 
 
 class ModelScopeListingTests(unittest.TestCase):
+    def test_model_listing_without_type_excludes_parent_directories(self):
+        backend = object.__new__(ms2hf.ModelScopeBackend)
+        backend.token = None
+        backend.api = Mock()
+        # New ModelScope SDK compatibility layers discard the Type field.
+        backend.api.get_model_files.return_value = [
+            {"Path": "quant/int4_packed.pt", "Size": 123},
+            {"Path": "quant", "Size": 0},
+            {"Path": "quant/nested", "Size": 0},
+            {"Path": "quant/nested/config.json", "Size": 2},
+            {"Path": "empty.txt", "Size": 0},
+            {"Path": "quantization.json", "Size": 2},
+        ]
+        result = backend.list_files("owner/repo", "model", "master")
+        self.assertEqual([f.path for f in result], [
+            "quant/int4_packed.pt", "quant/nested/config.json", "empty.txt", "quantization.json",
+        ])
+
     def test_model_and_dataset_listings_exclude_directories(self):
         backend = object.__new__(ms2hf.ModelScopeBackend)
         backend.token = None
