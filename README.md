@@ -411,6 +411,10 @@ ms2hf/
 
 ## 当前限制
 
+从 ModelScope 同步模型到 Hugging Face 时，会自动移除根目录 `README.md` 元数据中
+`base_model` 的空值或空列表项，避免 Hugging Face 拒绝上传。有效模型引用、其他元数据和
+README 正文会保留；本地下载的原文件不变。目录本身不参与同步，目录内的文件仍正常同步。
+
 - 目前“是否已存在”主要按文件路径判断，不做跨平台 hash 对比。
 - 每个文件会单独上传并产生一次提交，适合低存储环境，但同步大量小文件时可能较慢。
 - ModelScope 当前 SDK 的 `upload_file` 通常提交到默认分支，因此 `--target-revision` 在目标为 ModelScope 时可能不会生效。

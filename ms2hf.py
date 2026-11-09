@@ -129,6 +129,34 @@ def _coerce_size(value: object) -> Optional[int]:
         return None
 
 
+def _clean_hf_model_card(content: bytes) -> bytes:
+    """Remove empty base_model references rejected by Hugging Face."""
+    import yaml
+
+    text = content.decode("utf-8")
+    front_matter = re.match(r"\A(\ufeff?---\r?\n)(.*?)(^---[ \t]*\r?$)", text, re.MULTILINE | re.DOTALL)
+    if front_matter is None:
+        return content
+    metadata = yaml.safe_load(front_matter.group(2))
+    if not isinstance(metadata, dict) or "base_model" not in metadata:
+        return content
+    original = metadata["base_model"]
+    if isinstance(original, list):
+        cleaned = [value for value in original if value is not None and value != ""]
+        if cleaned == original:
+            return content
+        if cleaned:
+            metadata["base_model"] = cleaned
+        else:
+            del metadata["base_model"]
+    elif original is None or original == "":
+        del metadata["base_model"]
+    else:
+        return content
+    header = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False)
+    return (text[:front_matter.start(2)] + header + text[front_matter.end(2):]).encode("utf-8")
+
+
 class HuggingFaceBackend:
     """Hugging Face platform adapter.
 
@@ -182,8 +210,15 @@ class HuggingFaceBackend:
         commit_message: str,
         target_revision: Optional[str] = None,
     ) -> None:
+        upload_content = str(local_path)
+        if repo_type == REPO_TYPE_MODEL and file_path == "README.md":
+            original = local_path.read_bytes()
+            cleaned = _clean_hf_model_card(original)
+            if cleaned != original:
+                upload_content = cleaned
+                print("README.md: removed empty base_model metadata for Hugging Face")
         self.api.upload_file(
-            path_or_fileobj=str(local_path),
+            path_or_fileobj=upload_content,
             path_in_repo=file_path,
             repo_id=repo_id,
             repo_type=_hf_repo_type(repo_type),
